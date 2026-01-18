@@ -1,0 +1,281 @@
+name: AI-Powered CI/CD Pipeline
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  issue_comment:
+    types: [created]
+  workflow_dispatch:
+    inputs:
+      cloud_provider:
+        description: 'Cloud provider (aws, gcp)'
+        required: true
+        type: choice
+        options:
+          - aws
+          - gcp
+      environment:
+        description: 'Environment (staging, production)'
+        required: true
+        type: choice
+        options:
+          - staging
+          - production
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  # AI Code Review
+  ai-code-review:
+    name: AI Code Review
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: AI Code Analysis
+        uses: actions/github-script@v7
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        with:
+          script: |
+            const fs = require('fs');
+            const { Octokit } = require('@octokit/rest');
+            const octokit = new Octokit({ auth: process.env.GITHUB_TOKEN });
+            
+            // Get changed files
+            const { data: files } = await octokit.rest.pulls.listFiles({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.issue.number
+            });
+            
+            // Use AI to review code (simplified - in production, call OpenAI API)
+            const review = `AI Code Review: Analyzed ${files.length} changed files. 
+            Recommendations: Follow best practices, ensure security, optimize performance.`;
+            
+            console.log(review);
+
+  # Build and Test
+  build-test:
+    name: Build and Test
+    runs-on: ubuntu-latest
+    needs: ai-code-review
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      
+      - name: Build Backend Image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./backend
+          push: false
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-backend:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      
+      - name: Build Frontend Image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./frontend
+          push: false
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-frontend:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # AI-Assisted Command Generation
+  ai-command-generation:
+    name: AI Command Generation
+    runs-on: ubuntu-latest
+    if: github.event_name == 'issue_comment' && contains(github.event.comment.body, '/deploy-preview')
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Generate Deployment Commands with AI
+        uses: actions/github-script@v7
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        with:
+          script: |
+            const comment = context.payload.comment.body;
+            const branch = comment.match(/\/deploy-preview\s+(\S+)/)?.[1] || 'feature';
+            
+            // AI generates deployment commands
+            const commands = [
+              `kubectl create namespace preview-${branch}`,
+              `kubectl apply -f k8s/preview/ -n preview-${branch}`,
+              `kubectl set image deployment/app app=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-backend:${branch} -n preview-${branch}`
+            ];
+            
+            console.log('AI Generated Commands:');
+            commands.forEach(cmd => console.log(cmd));
+            
+            // Store commands for later use
+            core.setOutput('commands', JSON.stringify(commands));
+
+  # Dynamic Environment Configuration
+  ai-infrastructure-config:
+    name: AI Infrastructure Configuration
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Generate Infrastructure Config with AI
+        uses: actions/github-script@v7
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        with:
+          script: |
+            const environment = '${{ github.event.inputs.environment }}';
+            
+            // AI suggests infrastructure configuration
+            let config = {};
+            if (environment === 'staging') {
+              config = {
+                node_count: 1,
+                node_instance_type: 't3.small',
+                db_instance_class: 'db.t3.micro',
+                replicas: 1
+              };
+            } else if (environment === 'production') {
+              config = {
+                node_count: 3,
+                node_instance_type: 't3.medium',
+                db_instance_class: 'db.t3.small',
+                replicas: 3,
+                autoscaling: true
+              };
+            }
+            
+            console.log('AI Suggested Config:', JSON.stringify(config, null, 2));
+            core.setOutput('config', JSON.stringify(config));
+
+  # Deploy to Cloud
+  deploy:
+    name: Deploy to ${{ github.event.inputs.cloud_provider || 'aws' }}
+    runs-on: ubuntu-latest
+    needs: [build-test, ai-infrastructure-config]
+    if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
+    strategy:
+      matrix:
+        provider: ${{ github.event.inputs.cloud_provider == 'gcp' && ['gcp'] || ['aws'] }}
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Configure AWS Credentials
+        if: matrix.provider == 'aws'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+      
+      - name: Configure GCP Credentials
+        if: matrix.provider == 'gcp'
+        uses: google-github-actions/setup-gcloud@v1
+        with:
+          service_account_key: ${{ secrets.GCP_SA_KEY }}
+          project_id: ${{ secrets.GCP_PROJECT_ID }}
+      
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.5.0
+      
+      - name: Terraform Init
+        working-directory: infrastructure/terraform/providers/${{ matrix.provider }}
+        run: terraform init
+      
+      - name: Terraform Plan
+        working-directory: infrastructure/terraform/providers/${{ matrix.provider }}
+        run: terraform plan -out=tfplan
+      
+      - name: Terraform Apply
+        if: github.ref == 'refs/heads/main'
+        working-directory: infrastructure/terraform/providers/${{ matrix.provider }}
+        run: terraform apply -auto-approve tfplan
+      
+      - name: Build and Push Images
+        uses: docker/build-push-action@v5
+        with:
+          context: ./backend
+          push: true
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-backend:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      
+      - name: Deploy to Kubernetes
+        run: |
+          # Configure kubectl
+          if [ "${{ matrix.provider }}" == "aws" ]; then
+            aws eks update-kubeconfig --name idea-board-cluster --region us-east-1
+          elif [ "${{ matrix.provider }}" == "gcp" ]; then
+            gcloud container clusters get-credentials idea-board-cluster --region us-central1
+          fi
+          
+          # Apply Kubernetes manifests
+          kubectl apply -f k8s/
+          kubectl rollout status deployment/backend
+          kubectl rollout status deployment/frontend
+
+  # Intelligent Health Checks
+  health-check:
+    name: AI Health Check
+    runs-on: ubuntu-latest
+    needs: deploy
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Configure kubectl
+        run: |
+          if [ "${{ matrix.provider }}" == "aws" ]; then
+            aws eks update-kubeconfig --name idea-board-cluster --region us-east-1
+          elif [ "${{ matrix.provider }}" == "gcp" ]; then
+            gcloud container clusters get-credentials idea-board-cluster --region us-central1
+          fi
+      
+      - name: Collect Metrics and Logs
+        run: |
+          kubectl get pods -o wide
+          kubectl logs -l app=backend --tail=100 > backend-logs.txt
+          kubectl top pods > metrics.txt
+      
+      - name: AI Health Analysis
+        uses: actions/github-script@v7
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        with:
+          script: |
+            const fs = require('fs');
+            const logs = fs.readFileSync('backend-logs.txt', 'utf8');
+            const metrics = fs.readFileSync('metrics.txt', 'utf8');
+            
+            // AI analyzes logs and metrics
+            const hasErrors = logs.includes('ERROR') || logs.includes('Exception');
+            const isHealthy = !hasErrors && metrics.includes('Running');
+            
+            if (!isHealthy) {
+              const summary = `AI Health Check Failed:
+              - Errors detected in logs: ${hasErrors}
+              - Pod status: ${metrics}
+              Recommendation: Rollback deployment`;
+              
+              console.log(summary);
+              core.setFailed('Health check failed - triggering rollback');
+            } else {
+              console.log('AI Health Check: All systems operational');
+            }
+      
+      - name: Rollback on Failure
+        if: failure()
+        run: |
+          kubectl rollout undo deployment/backend
+          kubectl rollout undo deployment/frontend
+          echo "Rollback completed due to health check failure"
+

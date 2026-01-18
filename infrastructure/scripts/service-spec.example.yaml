@@ -1,0 +1,43 @@
+# Example service specification for AI IaC Generator
+# This file demonstrates how to specify a new service for automatic Terraform generation
+
+name: user-service
+cloud_provider: aws
+environment: production
+
+# Resource specifications
+instance_type: t3.medium
+replicas: 3
+autoscaling:
+  enabled: true
+  min_replicas: 2
+  max_replicas: 10
+  target_cpu: 70
+
+# Database requirements
+database:
+  type: postgresql
+  size: small
+  backups: true
+
+# Networking
+networking:
+  public: false
+  ports:
+    - 8080
+    - 9090
+
+# Monitoring
+monitoring:
+  enabled: true
+  alerts:
+    - cpu_usage > 80%
+    - memory_usage > 85%
+    - error_rate > 5%
+
+# Security
+security:
+  ssl: true
+  authentication: required
+  rate_limiting: enabled
+
